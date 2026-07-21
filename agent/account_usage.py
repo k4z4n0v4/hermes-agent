@@ -784,9 +784,19 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
         used_credits = extra.get("used_credits")
         monthly_limit = extra.get("monthly_limit")
         currency = extra.get("currency") or "USD"
+        # Anthropic's /api/oauth/usage returns used_credits / monthly_limit in
+        # MINOR units (cents for USD), not whole dollars — `decimal_places: 2`
+        # in the payload documents the minor-unit scale. Formatting the raw
+        # integer cents as dollars inflated the figure 100x (e.g. $447.71 of
+        # $1,500 rendered as "44771.00 / 150000.00 USD"). Divide by 10**
+        # decimal_places so the string matches the claude.ai settings/usage UI.
+        # Guard against division by zero / missing decimal_places; default to 2
+        # (the only value Anthropic ships today, but a sane fallback if omitted).
+        dp = extra.get("decimal_places")
+        scale = 10 ** int(dp) if isinstance(dp, int) and dp >= 0 else 100
         if isinstance(used_credits, (int, float)) and isinstance(monthly_limit, (int, float)):
             details.append(
-                f"Extra usage: {used_credits:.2f} / {monthly_limit:.2f} {currency}"
+                f"Extra usage: {used_credits / scale:.2f} / {monthly_limit / scale:.2f} {currency}"
             )
     return AccountUsageSnapshot(
         provider="anthropic",

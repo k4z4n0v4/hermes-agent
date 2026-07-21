@@ -165,6 +165,50 @@ def test_fetch_account_usage_openrouter_uses_limit_remaining_and_ignores_depreca
     assert all("-1 requests / 10s" not in line for line in render_account_usage_lines(snapshot))
 
 
+def test_fetch_account_usage_anthropic_extra_usage_is_minor_units_not_dollars(monkeypatch):
+    """Anthropic's /api/oauth/usage returns used_credits / monthly_limit in
+    MINOR units (cents for USD), documented by `decimal_places: 2` in the
+    payload. Formatting the raw integer cents as dollars inflated the figure
+    100x: $447.71 of $1,500 rendered as "44771.00 / 150000.00 USD". The detail
+    line must divide by 10**decimal_places so it matches the claude.ai UI.
+    """
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_anthropic_token",
+        lambda: "sk-ant-oat01-test-token",
+    )
+    monkeypatch.setattr(
+        "agent.account_usage._is_oauth_token",
+        lambda token: True,
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "five_hour": {"utilization": 0.42, "resets_at": 1_900_000_000},
+                "extra_usage": {
+                    "is_enabled": True,
+                    "monthly_limit": 150000,
+                    "used_credits": 44771.0,
+                    "utilization": 29.84733333333333,
+                    "currency": "USD",
+                    "decimal_places": 2,
+                    "disabled_reason": None,
+                    "daily": None,
+                    "weekly": None,
+                },
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("anthropic")
+
+    assert snapshot is not None
+    assert snapshot.provider == "anthropic"
+    assert "Extra usage: 447.71 / 1500.00 USD" in snapshot.details
+    # The naive (pre-fix) rendering would have produced the 100x-inflated form:
+    assert "44771.00 / 150000.00" not in "\n".join(snapshot.details)
+
+
 def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit(monkeypatch):
     monkeypatch.setattr(
         "agent.account_usage.resolve_runtime_provider",
