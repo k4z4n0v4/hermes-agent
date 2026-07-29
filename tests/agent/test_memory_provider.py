@@ -1367,7 +1367,9 @@ class TestHonchoCadenceTracking:
 
 
 class TestMemoryToolToolsetGate:
-    """Issue #5544: memory provider tools must respect platform_toolsets.
+    """Issue #5544 / #46108: memory provider tools must respect platform_toolsets
+    AND disabled_toolsets, while allowing explicitly-configured providers to inject
+    their tools even when the legacy ``memory`` toolset is not in enabled_toolsets.
 
     Before the fix, MemoryManager.get_all_tool_schemas() output was appended
     to AIAgent.tools unconditionally in agent_init.py — bypassing the
@@ -1376,20 +1378,28 @@ class TestMemoryToolToolsetGate:
     causing 10x latency on local models (Qwen3-30B: 1.7s → 42s) and
     tool-call loops on small models.
 
-    These tests exercise the shared gate used by agent init and ACP refreshes.
+    Issue #46108 extended the gate: removing the ``memory`` toolset (to hide
+    the legacy ``memory()`` function) should not silently suppress external
+    provider tools (Honcho, Mnemosyne, etc.) when ``memory.provider`` is
+    explicitly configured.  However, ``disabled_toolsets: [memory]`` (the
+    documented hard-suppression list) must still kill provider tools.
+
     The gate condition is:
 
-        enabled_toolsets is None        → no filter, inject (backward compat)
-        selected toolsets include memory → user opted in, inject
-        otherwise (incl. [])            → skip injection
+        disabled_toolsets contains "memory"   → hard kill, never inject
+        enabled_toolsets is None              → no filter, inject (backward compat)
+        selected toolsets include memory      → user opted in, inject
+        provider configured, not hard-disabled → inject (issue #46108 fix)
+        otherwise                             → skip injection
     """
 
     @staticmethod
-    def _run_memory_injection(enabled_toolsets, memory_manager):
+    def _run_memory_injection(enabled_toolsets, memory_manager, *, disabled_toolsets=None):
         """Run the shared memory-tool injection helper against a fake agent."""
         fake_agent = SimpleNamespace(
             _memory_manager=memory_manager,
             enabled_toolsets=enabled_toolsets,
+            disabled_toolsets=disabled_toolsets,
             tools=[],
             valid_tool_names=set(),
         )
@@ -1405,6 +1415,10 @@ class TestMemoryToolToolsetGate:
         )
         mgr.add_provider(p)
         return mgr
+
+    def _mgr_without_tools(self):
+        """Build a MemoryManager with no providers (simulates misconfigured provider)."""
+        return MemoryManager()
 
     def test_none_toolsets_injects(self):
         """enabled_toolsets=None (no filter) injects memory tools — backward compat."""
@@ -1426,16 +1440,33 @@ class TestMemoryToolToolsetGate:
         assert "hindsight_recall" in names
         assert any(t["function"]["name"] == "hindsight_recall" for t in tools)
 
-    def test_empty_toolsets_blocks_injection(self):
-        """`platform_toolsets: telegram: []` must suppress memory tools. (#5544)"""
+    def test_empty_toolsets_with_provider_injects(self):
+        """`platform_toolsets: telegram: []` with a configured provider injects
+        provider tools (issue #46108). Without a provider, empty toolsets block."""
         mgr = self._mgr_with_tools("fact_store")
+        tools, names = self._run_memory_injection([], mgr)
+        assert "fact_store" in names
+        assert any(t["function"]["name"] == "fact_store" for t in tools)
+
+    def test_empty_toolsets_without_provider_blocks(self):
+        """Empty toolsets and no provider configured → block injection (#5544)."""
+        mgr = self._mgr_without_tools()
         tools, names = self._run_memory_injection([], mgr)
         assert tools == []
         assert names == set()
 
-    def test_toolsets_without_memory_blocks_injection(self):
-        """Toolsets that don't include memory must suppress injection."""
+    def test_toolsets_without_memory_with_provider_injects(self):
+        """Toolsets that don't include memory inject when a provider is configured
+        (issue #46108). The user removed the legacy memory toolset but kept
+        memory.provider — provider tools should still appear."""
         mgr = self._mgr_with_tools("fact_store")
+        tools, names = self._run_memory_injection(["terminal", "web"], mgr)
+        assert "fact_store" in names
+        assert any(t["function"]["name"] == "fact_store" for t in tools)
+
+    def test_toolsets_without_memory_without_provider_blocks(self):
+        """Toolsets without memory AND no provider configured → block injection."""
+        mgr = self._mgr_without_tools()
         tools, names = self._run_memory_injection(["terminal", "web"], mgr)
         assert tools == []
         assert names == set()
@@ -1445,18 +1476,64 @@ class TestMemoryToolToolsetGate:
         tools, names = self._run_memory_injection(None, None)
         assert tools == []
 
-    def test_multiple_schemas_all_blocked_together(self):
-        """When the gate is closed, no memory tools leak — not even partially."""
+    def test_multiple_schemas_all_injected_with_provider(self):
+        """When a provider is configured, all its tool schemas are injected
+        even without the memory toolset (issue #46108)."""
         mgr = self._mgr_with_tools("fact_store", "memory_search", "memory_add")
         tools, names = self._run_memory_injection(["terminal"], mgr)
-        assert tools == []
-        assert names == set()
+        assert names == {"fact_store", "memory_search", "memory_add"}
 
     def test_multiple_schemas_all_injected_when_enabled(self):
-        """When the gate is open, every memory tool schema is injected."""
+        """When the gate is open via memory toolset, every memory tool schema is injected."""
         mgr = self._mgr_with_tools("fact_store", "memory_search", "memory_add")
         tools, names = self._run_memory_injection(None, mgr)
         assert names == {"fact_store", "memory_search", "memory_add"}
+
+    # ── disabled_toolsets (hard kill) — issue #49386 / teknium1 feedback ──
+
+    def test_hard_disabled_blocks_even_with_provider(self):
+        """disabled_toolsets=['memory'] is a hard kill — provider tools must NOT
+        be injected even when a provider is explicitly configured.
+        This preserves the documented global-suppression contract."""
+        mgr = self._mgr_with_tools("fact_store")
+        tools, names = self._run_memory_injection(
+            None, mgr, disabled_toolsets=["memory"],
+        )
+        assert tools == []
+        assert names == set()
+
+    def test_hard_disabled_blocks_with_memory_in_enabled(self):
+        """Even if 'memory' is in enabled_toolsets, disabled_toolsets takes
+        precedence (disabled is subtracted after enabled in model_tools.py)."""
+        mgr = self._mgr_with_tools("fact_store")
+        tools, names = self._run_memory_injection(
+            ["terminal", "memory", "web"], mgr, disabled_toolsets=["memory"],
+        )
+        assert tools == []
+        assert names == set()
+
+    def test_hard_disabled_other_toolset_doesnt_block_memory(self):
+        """disabled_toolsets=['web'] should not affect memory provider tools."""
+        mgr = self._mgr_with_tools("fact_store")
+        tools, names = self._run_memory_injection(
+            ["terminal", "memory"], mgr, disabled_toolsets=["web"],
+        )
+        assert "fact_store" in names
+
+    def test_no_disabled_toolsets_attribute_defaults_to_none(self):
+        """Agent without disabled_toolsets attribute (e.g. ACP SimpleNamespace)
+        should not crash — defaults to None → not hard-disabled."""
+        # Simulate the ACP /tools command which creates a SimpleNamespace
+        # without disabled_toolsets
+        fake_agent = SimpleNamespace(
+            _memory_manager=self._mgr_with_tools("fact_store"),
+            enabled_toolsets=["terminal"],
+            tools=[],
+            valid_tool_names=set(),
+            # Note: NO disabled_toolsets attribute
+        )
+        inject_memory_provider_tools(fake_agent)
+        assert "fact_store" in fake_agent.valid_tool_names
 
 
 class TestContextEngineToolsetGate:

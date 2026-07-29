@@ -80,22 +80,63 @@ def normalize_tool_schema(schema: Any) -> Optional[Dict[str, Any]]:
     return schema
 
 
-def memory_provider_tools_enabled(enabled_toolsets: Optional[List[str]]) -> bool:
-    """Return whether external memory-provider tools should be exposed."""
+def memory_provider_tools_enabled(
+    enabled_toolsets: Optional[List[str]],
+    *,
+    disabled_toolsets: Optional[List[str]] = None,
+    has_provider: bool = False,
+) -> bool:
+    """Return whether external memory-provider tools should be exposed.
+
+    The gate honours three signals, in order of precedence:
+
+    1. ``disabled_toolsets`` (hard kill) — if ``"memory"`` is explicitly
+       listed, provider tools are suppressed regardless of other settings.
+       This preserves the documented global-suppression contract
+       (configuration.md §disabled_toolsets).
+    2. ``enabled_toolsets`` (opt-in) — if ``"memory"`` is present (directly
+       or via a composite toolset), provider tools are exposed.
+    3. **Provider configured** — if a memory provider is active
+       (``has_provider=True``) and memory was *not* hard-disabled, provider
+       tools are exposed even when ``"memory"`` is absent from
+       ``enabled_toolsets``.  This fixes issue #46108: removing the legacy
+       ``memory`` toolset should not silently suppress external provider
+       tools (Honcho, Mnemosyne, etc.) that the user explicitly configured
+       via ``memory.provider``.
+
+    ``enabled_toolsets is None`` means "no filter" (backward compat) and
+    always allows injection unless hard-disabled.
+    """
+    # 1. Hard kill takes precedence.
+    if disabled_toolsets and "memory" in disabled_toolsets:
+        return False
+
+    # 2. No filter → allow (backward compat).
     if enabled_toolsets is None:
         return True
+
+    # 3. Empty list → only allow if a provider is explicitly configured.
     if not enabled_toolsets:
-        return False
+        return has_provider
+
+    # 4. "memory" in enabled toolsets → allow.
     if "memory" in enabled_toolsets:
         return True
 
+    # 5. Composite toolset that resolves to "memory" → allow.
     try:
         from toolsets import resolve_toolset
 
-        return any("memory" in resolve_toolset(name) for name in enabled_toolsets)
+        if any("memory" in resolve_toolset(name) for name in enabled_toolsets):
+            return True
     except Exception:
         logger.debug("Failed to resolve enabled toolsets for memory-provider tools", exc_info=True)
-        return False
+
+    # 6. Provider configured but memory toolset simply not included → allow.
+    if has_provider:
+        return True
+
+    return False
 
 
 def inject_memory_provider_tools(agent: Any) -> int:
@@ -110,9 +151,14 @@ def inject_memory_provider_tools(agent: Any) -> int:
         for tool in tools
         if isinstance(tool, dict)
     }
+    _has_provider = bool(memory_manager.providers)
     if (
         "memory" not in existing_tool_names
-        and not memory_provider_tools_enabled(getattr(agent, "enabled_toolsets", None))
+        and not memory_provider_tools_enabled(
+            getattr(agent, "enabled_toolsets", None),
+            disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+            has_provider=_has_provider,
+        )
     ):
         return 0
 
