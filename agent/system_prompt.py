@@ -15,8 +15,9 @@ Three tiers are joined with ``\\n\\n``:
   alibaba model-name workaround, environment hints, platform hints.
 * ``context``  — caller-supplied ``system_message`` plus context files
   (AGENTS.md / .cursorrules / etc.) discovered under ``TERMINAL_CWD``.
-* ``volatile`` — memory snapshot, USER.md profile, external memory
-  provider block, timestamp/session/model/provider line.
+* ``volatile`` — memory snapshot, USER.md profile, timestamp/
+  session/model/provider line. (External memory provider identity
+  block is static — injected in the stable tier after SOUL.md.)
 
 Pure helpers that read the agent's state.  AIAgent keeps thin forwarders.
 """
@@ -194,6 +195,20 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if not _soul_loaded:
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
+
+    # External memory provider identity block (e.g. Honcho "you are not a
+    # stateless chatbot" framing).  This is STATIC text from
+    # MemoryProvider.system_prompt_block() — it does not change between
+    # turns (live recall is injected separately via prefetch()).  Placed
+    # here, right after SOUL.md / identity, so the model knows it has
+    # persistent memory before any tool guidance or skills listing.
+    if agent._memory_manager:
+        try:
+            _ext_mem_block = agent._memory_manager.build_system_prompt()
+            if _ext_mem_block:
+                stable_parts.append(_ext_mem_block)
+        except Exception:
+            pass
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
@@ -507,14 +522,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             if user_block:
                 volatile_parts.append(user_block)
 
-    # External memory provider system prompt block (additive to built-in)
-    if agent._memory_manager:
-        try:
-            _ext_mem_block = agent._memory_manager.build_system_prompt()
-            if _ext_mem_block:
-                volatile_parts.append(_ext_mem_block)
-        except Exception:
-            pass
+    # External memory provider system prompt block moved to stable tier
+    # (after SOUL.md/identity) — see above. Live recall is still injected
+    # per-turn via prefetch() into turn_context, not the system prompt.
 
     from hermes_time import now as _hermes_now
     now = _hermes_now()
