@@ -391,21 +391,61 @@ def generate_title(
         {"role": "user", "content": user_snippet},
     ]
 
-    try:
-        response = call_llm(
-            task="title_generation",
-            messages=messages,
-            # A title is a handful of tokens. The old 500-token ceiling let a
-            # chatty model burn seconds generating prose we then threw away.
-            max_tokens=64,
-            temperature=0.3,
-            timeout=timeout,
-            main_runtime=main_runtime,
-            extra_body={"response_format": _TITLE_RESPONSE_FORMAT},
-        )
+    def _call_title_llm(use_response_format: bool):
+        if use_response_format:
+            response = call_llm(
+                task="title_generation",
+                messages=messages,
+                # A title is a handful of tokens. The old 500-token ceiling let
+                # a chatty model burn seconds generating prose we then threw
+                # away.
+                max_tokens=64,
+                temperature=0.3,
+                timeout=timeout,
+                main_runtime=main_runtime,
+                extra_body={"response_format": _TITLE_RESPONSE_FORMAT},
+            )
+        else:
+            response = call_llm(
+                task="title_generation",
+                messages=messages,
+                max_tokens=64,
+                temperature=0.3,
+                timeout=timeout,
+                main_runtime=main_runtime,
+            )
         content = response.choices[0].message.content or ""
         return _clean_title(_extract_title_text(content))
+
+    try:
+        title = _call_title_llm(use_response_format=True)
+        if title:
+            return title
     except Exception as e:
+        # Some providers (e.g. Console Go / opencode-go) reject structured
+        # output with a 400 ("This response_format type is unavailable now").
+        # Fall back to an unconstrained call — the prompt still asks for a
+        # JSON object and _extract_title_text parses it from plain text, so
+        # the title upgrade keeps working until the provider enables the
+        # format (or the operator pins a different aux provider).
+        if "response_format" in str(e):
+            logger.warning(
+                "Title generation response_format rejected (%s); retrying unconstrained", e
+            )
+            try:
+                title = _call_title_llm(use_response_format=False)
+                if title:
+                    return title
+            except Exception as e2:
+                logger.warning("Title generation failed: %s", e2)
+                logger.debug("Title generation traceback", exc_info=True)
+                if failure_callback is not None:
+                    try:
+                        failure_callback("title generation", e2)
+                    except Exception:
+                        logger.debug("Title generation failure_callback raised", exc_info=True)
+                return None
+        # Not a structured-output rejection — surface as before.
         # Log at WARNING so this shows up in agent.log without debug mode.
         # Full detail at debug level for operators who need the stack.
         logger.warning("Title generation failed: %s", e)
