@@ -1166,9 +1166,18 @@ class TestMemoryToolToolsetGate:
         assert tools == []
         assert names == set()
 
-    def test_toolsets_without_memory_blocks_injection(self):
-        """Toolsets that don't include memory must suppress injection."""
+    def test_toolsets_without_memory_with_provider_injects(self):
+        """A populated toolset list lacking 'memory' still injects when a
+        memory provider is explicitly configured (#46108)."""
         mgr = self._mgr_with_tools("fact_store")
+        tools, names = self._run_memory_injection(["terminal", "web"], mgr)
+        assert "fact_store" in names
+        assert any(t["function"]["name"] == "fact_store" for t in tools)
+
+    def test_toolsets_without_memory_no_provider_blocks(self):
+        """A populated toolset list lacking 'memory' suppresses injection when
+        no provider is configured (preserves the latency guard)."""
+        mgr = MemoryManager()  # no providers configured
         tools, names = self._run_memory_injection(["terminal", "web"], mgr)
         assert tools == []
         assert names == set()

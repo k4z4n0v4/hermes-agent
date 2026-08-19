@@ -215,7 +215,8 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
         if get_mem_schemas is not None:
             from agent.memory_manager import memory_provider_tools_enabled  # same gate inject_memory_provider_tools uses
             if memory_provider_tools_enabled(
-                    enabled, getattr(agent, "disabled_toolsets", None), memory_tool_present="memory" in name_set):
+                    enabled, getattr(agent, "disabled_toolsets", None), memory_tool_present="memory" in name_set,
+                    has_provider=bool(getattr(getattr(agent, "_memory_manager", None), "providers", None))):
                 for schema in get_mem_schemas():
                     _add(schema)
     except Exception:
