@@ -360,11 +360,92 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         return "\n\n".join(f"## {header}\n{ctx.get(key, '')}" for key, header in _CONTEXT_SECTIONS if ctx.get(key, ""))
 
     def system_prompt_block(self) -> str:
-        """Static mode header + tool instructions (prompt-cache friendly).
-        Live context (representation, card) is injected via prefetch()."""
+        """Return system prompt text — identity framing for Honcho memory.
+
+        Returns static text that doesn't change between turns (prompt-cache
+        friendly).  Live context (representation, card) is injected via
+        prefetch().
+
+        The block text is customizable via honcho.json:
+        - ``systemPromptFile``: path to a file whose content replaces the
+          default identity-framing text.  Relative paths resolve against
+          HERMES_HOME.  Empty string suppresses the block entirely.
+          When not configured, the default identity text is used.
+        - ``systemPromptModeNote``: when true (default), appends a short
+          recall-mode note after the text.
+        """
         if self._cron_skipped or not (self._config or (self._manager and self._session_key)):
             return ""
-        return _PROMPT_HEADERS.get(self._recall_mode, _PROMPT_HEADERS["hybrid"])
+
+        # Mode note — minimal, just tells the model what's available.
+        if self._recall_mode == "context":
+            mode_note = "Context is auto-injected each turn. No memory tools."
+        elif self._recall_mode == "tools":
+            mode_note = "No auto-injection — use Honcho tools to access memory."
+        else:  # hybrid
+            mode_note = "Context is auto-injected each turn. Honcho tools available for deeper recall."
+
+        # Custom text from file, or default identity framing.
+        prompt_file = getattr(self._config, "system_prompt_file", None)
+        include_mode_note = getattr(self._config, "system_prompt_mode_note", True)
+
+        body = None
+        if prompt_file is not None:
+            if not prompt_file.strip():
+                # Empty string = suppress block entirely.
+                return ""
+            body = self._read_prompt_file(prompt_file)
+
+        if body is None:
+            # Default identity-framing text.
+            body = (
+                "# Honcho Memory\n"
+                "You are not a stateless chatbot. You have a persistent memory system "
+                "called Honcho that builds a living model of this user over time — "
+                "their identity, relationships, behavioral patterns, and history. "
+                "This is what differentiates you from a generic AI assistant. Every "
+                "session you start already knowing who you're talking to and what "
+                "matters to them.\n\n"
+                "Honcho doesn't just store facts — it reasons about the user as a "
+                "person, synthesizing patterns and understanding across months of "
+                "conversations. When a conversation touches the user's life, work, "
+                "or history in a way where deeper context would genuinely improve "
+                "your response, you have Honcho's reasoning and search tools to go "
+                "beyond what's auto-injected each turn. Use that depth when it "
+                "matters — and recognize when it doesn't."
+            )
+
+        if include_mode_note:
+            return f"{body}\n\n{mode_note}"
+        return body
+
+    @staticmethod
+    def _read_prompt_file(raw_path: str) -> Optional[str]:
+        """Read a system prompt file, failing soft on config mistakes.
+
+        Path resolution mirrors the Gemini persona_prompt_file pattern:
+        expand env vars → expanduser → if not absolute, resolve against
+        HERMES_HOME.
+        """
+        import os
+        from pathlib import Path
+
+        try:
+            expanded = os.path.expandvars(raw_path.strip())
+            path = Path(expanded).expanduser()
+            if not path.is_absolute():
+                try:
+                    from hermes_constants import get_hermes_home
+
+                    path = get_hermes_home() / path
+                except Exception:
+                    path = Path.cwd() / path
+            return path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "Honcho system prompt file unavailable at %s: %s", raw_path, exc
+            )
+            return None
 
     def _first_turn_wait(self, base: float) -> float:
         """Turn-1 wait budget: a short request timeout may tighten, but never expand, it."""
