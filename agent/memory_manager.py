@@ -85,26 +85,67 @@ def memory_provider_tools_enabled(
     disabled_toolsets: Optional[List[str]] = None,
     *,
     memory_tool_present: bool = False,
+    has_provider: bool = False,
 ) -> bool:
-    """Return whether external memory-provider tools should be exposed."""
+    """Return whether external memory-provider tools should be exposed.
+
+    The gate honours several signals, in order of precedence:
+
+    1. ``disabled_toolsets`` (hard kill) — if ``"memory"`` is explicitly
+       listed, provider tools are suppressed regardless of other settings.
+       This preserves the documented global-suppression contract
+       (configuration.md §disabled_toolsets).
+    2. ``memory_tool_present`` — a memory tool is already on the surface,
+       so skip redundant re-injection.
+    3. A *truly empty* ``enabled_toolsets`` (e.g. ``platform_toolsets:
+       telegram: []``) suppresses injection, per #5544's low-latency
+       contract — an empty platform toolset must not leak memory tools.
+    4. ``enabled_toolsets`` (opt-in) — if ``"memory"`` is present (directly
+       or via a composite toolset), provider tools are exposed.
+    5. **Provider configured** — if a memory provider is active
+       (``has_provider=True``) and memory was *not* hard-disabled, provider
+       tools are exposed even when ``"memory"`` is absent from a *populated*
+       ``enabled_toolsets``.  This fixes issue #46108: removing the legacy
+       ``memory`` toolset from a platform's toolset list should not silently
+       suppress external provider tools (Honcho, Mnemosyne, etc.) that the
+       user explicitly configured via ``memory.provider``.
+
+    ``enabled_toolsets is None`` means "no filter" (backward compat) and
+    always allows injection unless hard-disabled.
+    """
+    # 1. Hard kill takes precedence.
     if disabled_toolsets and "memory" in disabled_toolsets:
         return False
     if memory_tool_present:
         return True
+    # 2. No filter → allow (backward compat).
     if enabled_toolsets is None:
         return True
+    # 3. Truly empty list (e.g. ``platform_toolsets: telegram: []``) →
+    #    suppress.  Preserves the #5544 low-latency contract (empty platform
+    #    toolsets must not leak memory tools).  #46108 only relaxes the
+    #    *populated*-but-no-memory case below, not this hard-empty case.
     if not enabled_toolsets:
         return False
+    # 4. "memory" in enabled toolsets → allow.
     if "memory" in enabled_toolsets:
         return True
 
+    # 5. Composite toolset that resolves to "memory" → allow.
     try:
         from toolsets import resolve_toolset
 
-        return any("memory" in resolve_toolset(name) for name in enabled_toolsets)
+        if any("memory" in resolve_toolset(name) for name in enabled_toolsets):
+            return True
     except Exception:
         logger.debug("Failed to resolve enabled toolsets for memory-provider tools", exc_info=True)
-        return False
+
+    # 6. Provider configured but memory toolset simply not included → allow.
+    #    (the #46108 fix)
+    if has_provider:
+        return True
+
+    return False
 
 
 def inject_memory_provider_tools(agent: Any) -> int:
@@ -123,6 +164,7 @@ def inject_memory_provider_tools(agent: Any) -> int:
         getattr(agent, "enabled_toolsets", None),
         getattr(agent, "disabled_toolsets", None),
         memory_tool_present="memory" in existing_tool_names,
+        has_provider=bool(getattr(memory_manager, "providers", None)),
     ):
         return 0
 

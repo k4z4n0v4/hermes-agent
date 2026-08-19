@@ -7825,6 +7825,7 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
                 getattr(agent, "enabled_toolsets", None),
                 getattr(agent, "disabled_toolsets", None),
                 memory_tool_present="memory" in name_set,
+                has_provider=bool(getattr(memory_manager, "providers", None)) if memory_manager else False,
             ):
                 for schema in get_mem_schemas():
                     if isinstance(schema, dict):
