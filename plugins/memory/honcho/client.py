@@ -475,6 +475,16 @@ class HonchoClientConfig:
     session_strategy: str = "per-directory"
     session_peer_prefix: bool = False
     sessions: dict[str, str] = field(default_factory=dict)
+    # Path to a file whose content replaces the default Honcho system prompt
+    # block.  When set, the file is read as plain text (UTF-8) and its content
+    # replaces the default identity-framing text.  Relative paths resolve
+    # against HERMES_HOME.  Set to empty string to suppress the block entirely.
+    # When None (not configured), the default identity text is used.
+    system_prompt_file: str | None = None
+    # Whether to append the recall-mode note (e.g. "Context is auto-injected
+    # each turn.") after the system prompt text.  Default True.  Set to False
+    # if your custom file already covers mode information.
+    system_prompt_mode_note: bool = True
     # Raw global config for anything else consumers need
     raw: dict[str, Any] = field(default_factory=dict)
     # True when Honcho was explicitly configured for this host (hosts.hermes
@@ -812,6 +822,16 @@ class HonchoClientConfig:
             session_strategy=session_strategy,
             session_peer_prefix=session_peer_prefix,
             sessions=raw.get("sessions", {}),
+            system_prompt_file=(
+                host_block.get("systemPromptFile")
+                or raw.get("systemPromptFile")
+                or None
+            ),
+            system_prompt_mode_note=_resolve_bool(
+                host_block.get("systemPromptModeNote"),
+                raw.get("systemPromptModeNote"),
+                default=True,
+            ),
             raw=raw,
             explicitly_configured=_explicitly_configured,
             config_path=path,
