@@ -1188,8 +1188,9 @@ class TestMemoryToolToolsetGate:
         assert tools == []
 
     def test_multiple_schemas_all_blocked_together(self):
-        """When the gate is closed, no memory tools leak — not even partially."""
-        mgr = self._mgr_with_tools("fact_store", "memory_search", "memory_add")
+        """When the gate is closed (no provider, no 'memory' toolset), no
+        memory tools leak — not even partially."""
+        mgr = MemoryManager()  # no providers configured → gate closed
         tools, names = self._run_memory_injection(["terminal"], mgr)
         assert tools == []
         assert names == set()
