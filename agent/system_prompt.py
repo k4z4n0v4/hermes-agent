@@ -2,10 +2,10 @@
 
 Built once per session and reused across turns (only context compression
 triggers a rebuild) so the upstream prefix cache stays warm.  Three tiers are
-joined with ``\\n\\n``: ``stable`` (identity, guidance, env hints, coding brief,
+joined with ``\n\n``: ``stable`` (identity, external memory provider identity block, guidance, env hints, coding brief,
 platform hints), ``context`` (workspace snapshot, caller ``system_message``,
-context files) and ``volatile`` (skills index, memory, USER.md, external memory
-provider, timestamp line).  See ``references/system-prompt-invariant.md``.
+context files) and ``volatile`` (skills index, memory, USER.md,
+timestamp line).  See ``references/system-prompt-invariant.md``.
 """
 
 from __future__ import annotations
@@ -458,31 +458,42 @@ def _timestamp_line(agent: Any) -> str:
     return timestamp_line + "".join(f"\n{label}: {value}" for label, value in trailer if value)
 
 
+def _external_memory_identity_block(agent: Any) -> Optional[str]:
+    """External memory provider identity block (e.g. Honcho's "you are not a
+    stateless chatbot" framing).  STATIC text from
+    MemoryProvider.system_prompt_block() — it does not change between turns
+    (live recall is injected separately via prefetch()).  Placed in the stable
+    tier right after identity so the model knows it has persistent memory
+    before any tool guidance or skills listing (local preference: upstream
+    keeps it volatile).  Gated on the same check ``inject_memory_provider_tools``
+    uses so we never advertise provider tools that the agent's toolset
+    configuration has already gated off (#81014)."""
+    if not agent._memory_manager:
+        return None
+    try:
+        from agent.memory_manager import memory_provider_tools_exposed as _mem_exposed
+    except Exception:
+        _mem_exposed = None
+    if _mem_exposed is not None and not _mem_exposed(agent):
+        return None
+    try:
+        _ext_mem_block = agent._memory_manager.build_system_prompt()
+    except Exception:
+        _ext_mem_block = None
+    return _ext_mem_block or None
+
+
 def _memory_parts(agent: Any) -> List[str]:
-    """Built-in memory/USER.md blocks plus the external provider block (gated on
-    the same check ``inject_memory_provider_tools`` uses, so we never advertise
-    tools the toolset config gated off)."""
+    """Built-in memory/USER.md blocks (the external provider block lives in the
+    stable tier — see ``_external_memory_identity_block``)."""
     parts: List[str] = []
     if agent._memory_store:
         for enabled, kind in ((agent._memory_enabled, "memory"), (agent._user_profile_enabled, "user")):
             block = agent._memory_store.format_for_system_prompt(kind) if enabled else None
             if block:
                 parts.append(block)
-    # External memory provider system prompt block (additive to built-in). Gated on the same check
-    # ``inject_memory_provider_tools`` uses so we never advertise provider tools that the agent's toolset
-    # configuration has already gated off (#81014).
-    if agent._memory_manager:
-        try:
-            from agent.memory_manager import memory_provider_tools_exposed as _mem_exposed
-        except Exception:
-            _mem_exposed = None
-        if _mem_exposed is None or _mem_exposed(agent):
-            try:
-                _ext_mem_block = agent._memory_manager.build_system_prompt()
-            except Exception:
-                _ext_mem_block = None
-            if _ext_mem_block:
-                parts.append(_ext_mem_block)
+    # External memory provider block moved to the stable tier:
+    # see _external_memory_identity_block (local preference).
     return parts
 
 
@@ -598,6 +609,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _ctx_len = _cc_len if isinstance(_cc_len, int) and _cc_len > 0 else None
     # ── Stable tier ────────────────────────────────────────────────
     stable_parts, _soul_loaded = _identity_parts(agent, _ctx_len)
+    # External memory provider identity block: static text, placed right after
+    # identity so the model knows it has persistent memory before any tool
+    # guidance or skills listing (local preference — upstream keeps it in the
+    # volatile tier).  Gated on memory_provider_tools_exposed (#81014).
+    _ext_mem_block = _external_memory_identity_block(agent)
+    if _ext_mem_block:
+        stable_parts.append(_ext_mem_block)
     # The skill_view() pointer dangles without skill tools OR without the
     # hermes-agent skill installed, so the variant is chosen after the skills
     # index is built; this slot holds its position.
