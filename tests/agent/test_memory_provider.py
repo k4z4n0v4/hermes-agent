@@ -1441,8 +1441,25 @@ class TestSystemPromptGateParity:
 
     def test_tools_hidden_when_memory_not_in_enabled_toolsets(self):
         from agent.memory_manager import memory_provider_tools_exposed
-        agent, _mgr, _p = self._agent_with_provider(enabled_toolsets=["web_search"])
+        # No provider configured: a populated toolset list without "memory"
+        # must not leak provider tools (#81014, #5544 contract).
+        mgr = MemoryManager()  # empty — no provider registered
+        agent = SimpleNamespace(
+            _memory_manager=mgr,
+            enabled_toolsets=["web_search"],
+            disabled_toolsets=None,
+            tools=[],
+        )
         assert memory_provider_tools_exposed(agent) is False
+
+    def test_tools_exposed_when_provider_configured_and_memory_not_in_enabled_toolsets(self):
+        """#46108: an explicitly configured provider (via memory.provider)
+        keeps its tools even when a *populated* toolset list omits the legacy
+        "memory" toolset — the provider is the opt-in. Truly empty toolset
+        lists and disabled_toolsets:["memory"] still suppress (see above)."""
+        from agent.memory_manager import memory_provider_tools_exposed
+        agent, _mgr, _p = self._agent_with_provider(enabled_toolsets=["web_search"])
+        assert memory_provider_tools_exposed(agent) is True
 
     def test_tools_exposed_when_memory_tool_already_present(self):
         """The built-in "memory" tool is a sufficient opt-in even when the
