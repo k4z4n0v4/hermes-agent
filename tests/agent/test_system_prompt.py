@@ -543,12 +543,13 @@ class TestMemoryProviderSystemPromptGating:
     """
 
     @staticmethod
-    def _make_fake_manager(prompt_block: str):
+    def _make_fake_manager(prompt_block: str, providers: list | None = None):
         """Build a MemoryManager-like object exposing only what
         ``build_system_prompt_parts`` touches."""
         from unittest.mock import MagicMock
         mgr = MagicMock()
         mgr.build_system_prompt.return_value = prompt_block
+        mgr.providers = providers if providers is not None else []
         return mgr
 
     def _agent(self, *, enabled_toolsets, disabled_toolsets, prompt_block):
@@ -591,6 +592,21 @@ class TestMemoryProviderSystemPromptGating:
         full = _build(build_system_prompt, _memory_manager=agent._memory_manager,
                       enabled_toolsets=["web_search"], disabled_toolsets=None)
         assert block not in full
+
+    def test_block_exposed_when_provider_configured_without_memory_toolset(self):
+        # #46108 reconciliation: a configured memory provider exposes the
+        # system-prompt block (and provider tools) even when "memory" is absent
+        # from a *populated* enabled_toolsets list.
+        block = "PROVIDER_BLOCK_SENTINEL"
+        agent = self._agent(
+            enabled_toolsets=["web_search"],
+            disabled_toolsets=None,
+            prompt_block=block,
+        )
+        agent._memory_manager.providers = ["honcho"]
+        full = _build(build_system_prompt, _memory_manager=agent._memory_manager,
+                      enabled_toolsets=["web_search"], disabled_toolsets=None)
+        assert block in full
 
 
 class TestSessionStartLike:
