@@ -34,6 +34,46 @@ class TestAuxProbeMode:
         with aux._client_cache_lock:
             assert key not in aux._client_cache
 
+    def test_get_cached_client_never_caches_probe_stub(self, monkeypatch):
+        """The sync/async builder path must not cache stubs either — a cached stub is served
+        to the next same-key runtime caller (browser_vision's sync vision call after a
+        check_fn probe received one in production)."""
+        import agent.auxiliary_client as aux
+
+        stub = aux._AuxProbeClientStub(api_key="k", base_url="https://x.invalid/v1")
+        monkeypatch.setattr(aux, "resolve_provider_client", lambda *a, **kw: (stub, "qwen3.7-plus"))
+        with aux._client_cache_lock:
+            aux._client_cache.clear()
+        try:
+            client, _model = aux._get_cached_client("opencode-go", "qwen3.7-plus", is_vision=True)
+            assert client is stub  # probe callers still get their resolvability answer
+            with aux._client_cache_lock:
+                assert not aux._client_cache, "probe stub must never enter the client cache"
+        finally:
+            with aux._client_cache_lock:
+                aux._client_cache.clear()
+
+    def test_poisoned_probe_stub_cache_entry_evicted_on_hit(self, monkeypatch):
+        """A stub entry already in the cache (pre-guard poison) must be evicted on hit,
+        never returned, and the key rebuilt with a real client."""
+        import agent.auxiliary_client as aux
+
+        stub = aux._AuxProbeClientStub()
+        key = aux._client_cache_key("opencode-go", async_mode=False, is_vision=True, model="qwen3.7-plus")
+        with aux._client_cache_lock:
+            aux._client_cache.clear()
+            aux._client_cache[key] = (stub, "qwen3.7-plus", None)
+        real = object()
+        monkeypatch.setattr(aux, "resolve_provider_client", lambda *a, **kw: (real, "qwen3.7-plus"))
+        try:
+            client, _model = aux._get_cached_client("opencode-go", "qwen3.7-plus", is_vision=True)
+            assert client is real
+            with aux._client_cache_lock:
+                assert aux._client_cache[key][0] is real
+        finally:
+            with aux._client_cache_lock:
+                aux._client_cache.clear()
+
     def test_probe_stub_raises_on_runtime_use(self):
         import agent.auxiliary_client as aux
 

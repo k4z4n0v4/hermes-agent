@@ -5259,7 +5259,8 @@ def _schedule_async_close(close_result: Any, client: Any) -> None:
 
 def _close_cached_client(client: Any, *, close_async: bool = False) -> None:
     """Close one cached client, awaiting async transports only when safe."""
-    if client is None:
+    if client is None or isinstance(client, _AuxProbeClientStub):
+        # Probe stubs own no transport, and any attribute access on them raises.
         return
     close_fn = getattr(client, "close", None)
     if not callable(close_fn):
@@ -5354,10 +5355,10 @@ def _get_cached_client(
             loop_ok = not async_mode or (
                 cached_loop is not None and cached_loop is current_loop and not cached_loop.is_closed()
             )
-            if loop_ok:
+            if loop_ok and not isinstance(cached_client, _AuxProbeClientStub):
                 return cached_client, _compat_model(cached_client, model, cached_default)
-            # Stale async entry — evict. Only a closed owner loop may be awaited here; a live
-            # foreign loop stays force-neutered.
+            # Stale async entry, or a poisoned probe-stub entry — evict. Only a closed owner
+            # loop may be awaited here; a live foreign loop stays force-neutered.
             _close_cached_client(cached_client, close_async=cached_loop is not None and cached_loop.is_closed())
             del _client_cache[cache_key]
     # Build outside the lock. For pool-backed providers derive the key from the pool entry:
@@ -5372,7 +5373,10 @@ def _get_cached_client(
         provider, model, async_mode, explicit_base_url=base_url, explicit_api_key=effective_api_key,
         api_mode=api_mode, main_runtime=runtime, is_vision=is_vision, task=task,
     )
-    if client is not None:
+    if client is not None and not isinstance(client, _AuxProbeClientStub):
+        # Probe stubs answer resolvability only and must never enter the cache: the next
+        # runtime caller under the same key (e.g. browser_vision's sync call_llm task="vision"
+        # after a vision check_fn probe) would receive a dud client.
         with _client_cache_lock:
             if cache_key not in _client_cache:
                 # FIFO safety-belt eviction. Do NOT close evicted clients: another caller may be
