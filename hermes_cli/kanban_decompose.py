@@ -203,8 +203,12 @@ class _Routing:
 
 def _load_routing(*, root_assignee: Optional[str] = None) -> _Routing:
     from hermes_cli.config import load_config_readonly
+    from hermes_cli.kanban_db_boards import scoped_board_profile
     try:
-        cfg = load_config_readonly()
+        # Resolve orchestrator/default_assignee from the BOARD's owner profile
+        # when board.json binds one; the dispatcher's own config otherwise.
+        with scoped_board_profile():
+            cfg = load_config_readonly()
     except Exception:  # decompose_task promises ok=False, never a raise, on config trouble
         cfg = {}
     kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
