@@ -156,6 +156,7 @@ def _call_aux(verb: str, task_id: str, *, aux_task: str, system: str, user: str,
     except Exception as exc:  # pragma: no cover — import smoke test
         log.debug("%s: auxiliary client import failed: %s", verb, exc)
         return None, "auxiliary client unavailable"
+    from hermes_cli.kanban_db_boards import scoped_board_profile
     # Specify/decompose run outside any agent turn (CLI, dashboard route, gateway watcher), so no
     # conversation affinity scope is bound and the relay-affinity headers (x-opencode-session, the
     # OpenRouter/Portal sticky key) are omitted — the OpenCode Go relay rejects that with 400
@@ -167,13 +168,14 @@ def _call_aux(verb: str, task_id: str, *, aux_task: str, system: str, user: str,
         # Route through call_llm so auxiliary.triage_specifier.* config (provider/model/base_url,
         # extra_body, reasoning_effort, retries) all apply — the direct-create path dropped extra_body
         # (#35566).
-        resp = call_llm(
-            task=aux_task,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.3,
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
+        with scoped_board_profile():
+            resp = call_llm(
+                task=aux_task,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.3,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
     except Exception as exc:
         suffix = " — skipping" if verb == "specify" else ""
         log.info("%s: API call failed for %s (%s)%s", verb, task_id, exc, suffix)
