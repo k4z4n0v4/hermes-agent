@@ -9,11 +9,15 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import time
 from typing import Any
 from typing import Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _dir_holds_board(d: Path) -> bool:
@@ -64,6 +68,91 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
         pass
     meta["db_path"] = str(_kb.kanban_db_path(slug))
     return meta
+
+
+def board_owner_profile(board: Optional[str] = None) -> Optional[str]:
+    """The profile this board is bound to — ``board.json`` ``owner_profile``.
+
+    Boards live in one machine-global store, so without an explicit binding the
+    profile hosting the dispatcher drives every board's control-plane calls
+    (triage decompose/specify) and routing fallbacks. ``owner_profile`` lets a
+    board name the profile whose config — auxiliary models and credentials —
+    should run those calls. Absent, empty, malformed, or naming a profile that
+    no longer exists all read as "unbound", which keeps the previous behavior
+    exactly.
+    """
+    if board is None:
+        # ``read_board_metadata(None)`` means the DEFAULT board; the dispatcher
+        # and CLI pin the active board through get_current_board() (env or the
+        # ``kanban/current`` file), so resolve that first.
+        try:
+            board = _kb.get_current_board()
+        except Exception:
+            board = None
+    raw = read_board_metadata(board).get("owner_profile")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    from hermes_cli import profiles as _profiles
+    try:
+        if not _profiles.profile_exists(raw):
+            return None
+        return _profiles.normalize_profile_name(raw)
+    except Exception:
+        return None
+
+
+@contextlib.contextmanager
+def scoped_board_profile(board: Optional[str] = None):
+    """Run the block as the board's owner profile (or as a no-op when unbound).
+
+    ``load_config()``, ``auth.json`` and ``get_secret()`` all resolve through
+    ``get_hermes_home()``, so a dispatcher running from the default home
+    otherwise spends the default profile's ``auxiliary.kanban_decomposer`` /
+    ``auxiliary.triage_specifier`` model and credentials on every board. This
+    enters the owner profile's home (and, under multiplexing, its secret scope)
+    for the duration of the call. Yields the owner name, or ``None`` when the
+    board is unbound or the process already runs as that profile.
+    """
+    from hermes_cli import profiles as _profiles
+    from hermes_constants import (
+        get_hermes_home, reset_hermes_home_override, set_hermes_home_override,
+    )
+    name = board_owner_profile(board)
+    if not name:
+        yield None
+        return
+    try:
+        home = _profiles.get_profile_dir(name)
+    except Exception:
+        yield None
+        return
+    if str(home) == str(get_hermes_home()):
+        yield name
+        return
+    token = set_hermes_home_override(home)
+    scope_token = None
+    try:
+        # Under multiplexing every secret read is fail-closed against a bound
+        # scope; replace the dispatcher's own scope with the owner's so the aux
+        # call sees that profile's .env rather than the launch profile's. In a
+        # single-profile process os.environ already carries the launch env, and
+        # binding a foreign scope there would blind fall-through reads.
+        from agent.secret_scope import is_multiplex_active
+        if is_multiplex_active():
+            from agent.secret_scope import build_profile_secret_scope, set_secret_scope
+            scope_token = set_secret_scope(
+                build_profile_secret_scope(home), profile_home=str(home),
+            )
+    except Exception as exc:  # credential plumbing must never break triage
+        logger.warning("kanban: board owner profile %r secret scope failed (%s)", name, exc)
+        scope_token = None
+    try:
+        yield name
+    finally:
+        if scope_token is not None:
+            from agent.secret_scope import reset_secret_scope
+            reset_secret_scope(scope_token)
+        reset_hermes_home_override(token)
 
 
 def write_board_metadata(
