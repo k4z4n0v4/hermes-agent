@@ -210,6 +210,35 @@ class TestDocumentDownloadBlock:
 
 
     @pytest.mark.asyncio
+    async def test_two_documents_in_one_album_keep_one_flag_per_file(self, adapter):
+        """A multi-file album must carry one inline flag per media entry.
+
+        Merging used to extend the paths but keep only the first item's single flag, so
+        native admission refused the whole turn as ``media_text_inlined_length`` and the
+        agent never saw the files (users saw a generic error).
+        """
+        from gateway.session_envelope import _media_clause
+
+        csv = b"date,amount\n01/10/26,1000\n"
+        for name in ("first.csv", "second.csv"):
+            doc = _make_document(
+                file_name=name, mime_type="text/csv", file_size=len(csv),
+                file_obj=_make_file_obj(csv),
+            )
+            await adapter._handle_media_message(
+                _make_update(_make_message(document=doc, media_group_id="album-1")), MagicMock())
+
+        await asyncio.sleep(TelegramAdapter.MEDIA_GROUP_WAIT_SECONDS + 0.2)
+
+        event = adapter.handle_message.call_args[0][0]
+        assert len(event.media_urls) == 2
+        assert len(event.media_types) == 2
+        assert event.media_text_inlined == [True, True]
+        assert "first.csv" in event.text and "second.csv" in event.text
+        assert _media_clause(event) is None
+
+
+    @pytest.mark.asyncio
     async def test_document_cache_failure_replies_and_signals_agent(self, adapter):
         """A failed document download must surface on BOTH ends, not silently.
 

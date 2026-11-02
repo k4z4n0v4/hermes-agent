@@ -6654,8 +6654,21 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         if existing is None:
             pending[key] = event
             return
+        existing_urls = len(existing.media_urls)
+        added_urls = len(event.media_urls)
         existing.media_urls.extend(event.media_urls)
         existing.media_types.extend(event.media_types)
+        # ``media_text_inlined`` carries exactly one flag per media entry (empty = no flags).
+        # Merging documents used to extend the paths but keep only the first item's flag, and
+        # native admission then refused the whole event as ``media_text_inlined_length`` — a
+        # two-file album died before reaching the agent. Realign both sides while merging.
+        if existing.media_text_inlined or event.media_text_inlined:
+            def _aligned(flags, count):
+                flags = list(flags or [])
+                return flags[:count] + [False] * max(0, count - len(flags))
+            existing.media_text_inlined = (
+                _aligned(existing.media_text_inlined, existing_urls)
+                + _aligned(event.media_text_inlined, added_urls))
         if event.text:
             existing.text = self._merge_caption(existing.text, event.text)
 
